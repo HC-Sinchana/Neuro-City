@@ -1,39 +1,104 @@
-***Traffic Management System with Azure Integration***
 
-**Overview**
+import azure.functions as func
 
-This project is a real-time traffic management system leveraging Azure services for vehicle detection, data storage, and IoT communication. It uses Azure Computer Vision, Azure Data Lake Storage, and IoT Hub to analyze traffic density, store data, and dynamically control traffic signals.
+from azure.iot.hub import IoTHubRegistryManager
 
-**Features**
+from azure.cosmos import CosmosClient
 
-🔍 Real-time vehicle detection using Azure Computer Vision
+import numpy as np
 
-📊 Data storage in Azure Data Lake Storage Gen2
+from datetime import datetime
 
-📡 IoT Hub integration for telemetry data transmission
+import json
 
-🚦 Dynamic traffic signal control based on real-time vehicle count
+# Configuration
 
-🛠 Error handling and logging for robust operation
+CONNECTION_STRING = "YOUR_IOT_HUB_CONNECTION_STRING"
 
- **Tech Stack**
+COSMOS_URI = "YOUR_COSMOS_DB_URI"
 
-Backend: Python, OpenCV
+COSMOS_KEY = "YOUR_COSMOS_DB_KEY"
 
-Cloud Services: Azure Cognitive Services (Computer Vision), Azure Data Lake, Azure IoT Hub
 
-Data Processing: Pandas, Requests
 
-Deployment: Azure Portal, GitHub Actions (CI/CD)
+class TrafficManagementSystem:
 
-**Prerequisites**
+    def __init__(self):
+        self.iot_registry = IoTHubRegistryManager(CONNECTION_STRING)
+        self.cosmos_client = CosmosClient(COSMOS_URI, COSMOS_KEY)
+        self.database = self.cosmos_client.get_database_client("TrafficDB")
+        self.container = self.database.get_container_client("TrafficData")
+        
+    def process_sensor_data(self, sensor_data):
+        """Process incoming sensor data and predict traffic patterns"""
+        traffic_density = self._calculate_traffic_density(sensor_data)
+        predicted_wait_time = self._predict_wait_time(traffic_density)
+        signal_timing = self._calculate_signal_timing(predicted_wait_time)
+        
+        return {
+            "traffic_density": traffic_density,
+            "wait_time": predicted_wait_time,
+            "signal_timing": signal_timing
+        }
+    
+    def _calculate_traffic_density(self, sensor_data):
+        """Calculate traffic density from sensor data"""
+        # Simple density calculation based on vehicle count and road capacity
+        vehicle_count = sensor_data.get("vehicle_count", 0)
+        road_capacity = sensor_data.get("road_capacity", 100)
+        return min((vehicle_count / road_capacity) * 100, 100)
+    
+    def _predict_wait_time(self, traffic_density):
+        """Predict wait time based on traffic density"""
+        # Linear scaling between 30-150 seconds based on density
+        min_wait = 30
+        max_wait = 150
+        return min_wait + (traffic_density / 100) * (max_wait - min_wait)
+    
+    def _calculate_signal_timing(self, wait_time):
+        """Calculate optimal signal timing"""
+        green_time = max(min(wait_time, 150), 30)  # Bounded between 30-150 seconds
+        yellow_time = 5
+        return {
+            "green": green_time,
+            "yellow": yellow_time,
+            "red": green_time + yellow_time
+        }
+    
+    async def store_traffic_data(self, junction_id, traffic_data):
+        """Store traffic data in Cosmos DB"""
+        document = {
+            "id": f"{junction_id}-{datetime.utcnow().isoformat()}",
+            "junction_id": junction_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "traffic_data": traffic_data
+        }
+        await self.container.create_item(document)
+        
+# Azure Function HTTP trigger
 
-Before running the project, ensure you have:
+async def main(req: func.HttpRequest) -> func.HttpResponse:
 
-✅ An Azure account with required services (Computer Vision, Data Lake, IoT Hub)
-
-✅ Python 3.8+ installed on your system
-
-✅ Git installed for version control
-
-✅ OpenCV installed for video capture
+    try:
+        traffic_system = TrafficManagementSystem()
+        
+        # Get sensor data from request
+        sensor_data = req.get_json()
+        junction_id = sensor_data.get("junction_id")
+        
+        # Process traffic data
+        result = traffic_system.process_sensor_data(sensor_data)
+        
+        # Store results
+        await traffic_system.store_traffic_data(junction_id, result)
+        
+        return func.HttpResponse(
+            json.dumps(result),
+            mimetype="application/json",
+            status_code=200
+        )
+    except Exception as e:
+        return func.HttpResponse(
+            f"Error processing request: {str(e)}",
+            status_code=500
+        )
